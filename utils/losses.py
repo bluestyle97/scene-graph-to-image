@@ -83,7 +83,6 @@ def gan_d_loss(scores_real, scores_fake, gan_loss_type='gan'):
 
         return loss_real + loss_fake
     elif gan_loss_type == 'wgan':
-
         return scores_fake.mean() - scores_real.mean()
     else:
         if scores_real.dim() > 1:

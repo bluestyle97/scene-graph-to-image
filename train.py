@@ -52,13 +52,13 @@ def parse_args(yaml_file=None):
             return args
 
     parser = argparse.ArgumentParser('Train SceneGraph2Image Model')
+    parser.add_argument('--exp_name', default='exp', type=str)
     parser.add_argument('--dataset', default='vg', choices=['vg', 'coco'])
 
     # Optimization hyperparameters
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--num_iterations', default=1000000, type=int)
     parser.add_argument('--learning_rate', default=1e-4, type=float)
-    parser.add_argument('--num_gpus', default=1, type=int)
 
     # Dataset options common to both VG and COCO
     parser.add_argument('--image_size', default='128,128', type=int_tuple)
@@ -92,36 +92,34 @@ def parse_args(yaml_file=None):
     parser.add_argument('--crn_activation', default='leakyrelu-0.2')
     parser.add_argument('--crn_norm', default='batch')
 
-    # Generator losses
-    parser.add_argument('--bbox_loss_weight', default=10, type=float)
+    # Loss weights
+    parser.add_argument('--bbox_loss_weight', default=0.5, type=float)
     parser.add_argument('--mask_loss_weight', default=0, type=float)
-    parser.add_argument('--pixel_loss_weight', default=1.0, type=float)
+    parser.add_argument('--pixel_loss_weight', default=0.5, type=float)
+    parser.add_argument('--img_gan_loss_weight', default=0.1, type=float)
+    parser.add_argument('--obj_gan_loss_weight', default=0.1, type=float)
+    parser.add_argument('--obj_cls_loss_weight', default=0.1, type=float)
 
     # Generic discriminator options
-    parser.add_argument('--gan_loss_type', default='gan')
+    parser.add_argument('--gan_loss_type', default='lsgan')
     parser.add_argument('--d_activation', default='leakyrelu-0.2')
     parser.add_argument('--d_norm', default='batch')
-    parser.add_argument('--d_loss_weight', default=0.01, type=float)
 
     # Image discriminator
     parser.add_argument('--d_img_conv_dims', default='64,128,256', type=int_tuple)
     parser.add_argument('--d_img_fc_dim', default=1024, type=int)
-    parser.add_argument('--img_gan_loss_weight', default=1.0, type=float) # multiplied by d_loss_weight
 
     # Object discriminator
     parser.add_argument('--d_obj_conv_dims', default='64,128,256', type=int_tuple)
     parser.add_argument('--d_obj_fc_dim', default=1024, type=int)
     parser.add_argument('--d_obj_object_size', default='64,64', type=int_tuple)
-    parser.add_argument('--obj_gan_loss_weight', default=1.0, type=float) # multiplied by d_loss_weight 
-    parser.add_argument('--obj_cls_loss_weight', default=0.1, type=float)
 
     # Output options
     parser.add_argument('--print_period', default=20, type=int)
     parser.add_argument('--summary_period', default=100, type=int)
     parser.add_argument('--val_period', default=5000, type=int)
     parser.add_argument('--checkpoint_period', default=10000, type=int)
-    parser.add_argument('--summary_dir', default='outputs/summaries', type=str)
-    parser.add_argument('--checkpoint_dir', default='outputs/checkpoints', type=str)
+    parser.add_argument('--output_dir', default='outputs', type=str)
     parser.add_argument('--restore_checkpoint_from', default=None, type=str)
 
     args = parser.parse_args()
@@ -138,7 +136,7 @@ class Trainer(object):
 
         self.build_loader()     # build vocab, train_loader, val_loader
         self.build_model()      # build model, d_img, d_obj, optimizers
-        self.writer = SummaryWriter(self.args.summary_dir)
+        self.writer = SummaryWriter(os.path.join(args.output_dir, args.exp_name, 'summaries'))
     
     @timeit_func
     def build_loader(self):
@@ -156,7 +154,7 @@ class Trainer(object):
     @timeit_func
     def build_model(self):
         if self.args.restore_checkpoint_from is not None:
-            checkpoint = torch.load(self.args.restore_checkpoint_from)
+            checkpoint = torch.load(os.path.join(self.os.path.join(self.args.output_dir, self.args.exp_name, 'checkpoints'), self.args.restore_checkpoint_from))
             self.iteration = checkpoint['iteration']
             self.epoch = checkpoint['epoch']
 
@@ -244,7 +242,7 @@ class Trainer(object):
             'd_obj_optimizer_state': self.d_obj_optimizer.state_dict()
         }
         checkpoint_name = 'checkpoint-{:d}.pth.tar'.format(self.iteration)
-        torch.save(checkpoint, os.path.join(self.args.checkpoint_dir, checkpoint_name))
+        torch.save(checkpoint, os.path.join(self.os.path.join(self.args.output_dir, self.args.exp_name, 'checkpoints'), checkpoint_name))
 
     def train(self):
         self.model.cuda()
@@ -293,8 +291,8 @@ class Trainer(object):
                 g_loss_manager.add_loss(g_bbox_loss, 'G/bbox_loss', weight=self.args.bbox_loss_weight)
                 g_loss_manager.add_loss(g_mask_loss, 'G/mask_loss', weight=self.args.mask_loss_weight)
                 g_loss_manager.add_loss(g_pixel_loss, 'G/pixel_loss', weight=self.args.pixel_loss_weight)
-                g_loss_manager.add_loss(g_img_gan_loss, 'G/img_gan_loss', weight=self.args.d_loss_weight*self.args.img_gan_loss_weight)
-                g_loss_manager.add_loss(g_obj_gan_loss, 'G/obj_gan_loss', weight=self.args.d_loss_weight*self.args.obj_gan_loss_weight)
+                g_loss_manager.add_loss(g_img_gan_loss, 'G/img_gan_loss', weight=self.args.img_gan_loss_weight)
+                g_loss_manager.add_loss(g_obj_gan_loss, 'G/obj_gan_loss', weight=self.args.obj_gan_loss_weight)
                 g_loss_manager.add_loss(g_obj_cls_loss, 'G/obj_cls_loss', weight=self.args.obj_cls_loss_weight)
                 g_loss = g_loss_manager.get_total_loss()
 
@@ -323,16 +321,16 @@ class Trainer(object):
                 d_obj_fake_cls_loss = F.cross_entropy(obj_class_fake, objs)
 
                 d_img_loss_manager = LossManager('D_img/total_loss')
-                d_img_loss_manager.add_loss(d_img_gan_loss, 'D/img_gan_loss')
+                d_img_loss_manager.add_loss(d_img_gan_loss, 'D_img/img_gan_loss', weight=self.args.img_gan_loss_weight)
                 d_img_loss = d_img_loss_manager.get_total_loss()
                 self.d_img_optimizer.zero_grad()
                 d_img_loss.backward()
                 self.d_img_optimizer.step()
 
                 d_obj_loss_manager = LossManager('D_obj/total_loss')
-                d_obj_loss_manager.add_loss(d_obj_gan_loss, 'D_obj/obj_gan_loss')
-                d_obj_loss_manager.add_loss(d_obj_real_cls_loss, 'D_obj/obj_real_cls_loss')
-                d_obj_loss_manager.add_loss(d_obj_fake_cls_loss, 'D_obj/obj_fake_cls_loss')
+                d_obj_loss_manager.add_loss(d_obj_gan_loss, 'D_obj/obj_gan_loss', weight=self.args.obj_gan_loss_weight)
+                d_obj_loss_manager.add_loss(d_obj_real_cls_loss, 'D_obj/obj_real_cls_loss', weight=self.args.obj_cls_loss_weight)
+                d_obj_loss_manager.add_loss(d_obj_fake_cls_loss, 'D_obj/obj_fake_cls_loss', weight=self.args.obj_cls_loss_weight)
                 d_obj_loss = d_obj_loss_manager.get_total_loss()
                 self.d_obj_optimizer.zero_grad()
                 d_obj_loss.backward()
@@ -351,12 +349,13 @@ class Trainer(object):
                         self.writer.add_scalar(k, v, self.iteration)
                 
                 if self.iteration % self.args.checkpoint_period == 0:
-                    print('[iter {:d}] Sacing checkpoint to {:s} ...'.format(self.iteration, self.args.checkpoint_dir))
+                    print('[iter {:d}] Sacing checkpoint to {:s} ...'.format(self.iteration, self.os.path.join(args.output_dir, args.exp_name, 'checkpoints')))
                     self.save_checkpoint()
 
                 if self.iteration % self.args.val_period == 0:
                     print('[iter {:d}] Start running validation ...'.format(self.iteration))
                     self.val()
+                    self.model.train()      # reset to training mode
 
             self.epoch += 1
         
@@ -403,7 +402,8 @@ class Trainer(object):
 
 def main():
     args = parse_args()
-    create_dirs([args.summary_dir, args.checkpoint_dir])
+    create_dirs([os.path.join(args.output_dir, args.exp_name, 'summaries'), 
+                os.path.join(args.output_dir, args.exp_name, 'checkpoints')])
     trainer = Trainer(args)
     trainer.train()
 
